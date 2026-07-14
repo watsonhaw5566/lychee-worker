@@ -1,0 +1,12 @@
+# ide
+.idea
+.vscode
+
+# vendor
+vendor
+# 构建产物
+.phpunit.result.cache
+.php-cs-fixer.cache
+target
+modules
+

@@ -1,0 +1,50 @@
+# .gitattributes — controls which files are included in the archive that
+# packagist.org distributes to end users (`composer install` without
+# --prefer-source).
+#
+# Default behavior: every tracked file is shipped. We *exclude* files that
+# are only useful for developers of lychee-worker itself (Cargo build
+# artifacts, CI config, tests, editor/OS noise) while keeping everything
+# a consumer needs to rebuild the PHP extension via `cargo build --release`
+# or PIE, plus the ThinkPHP 8 plugin classes in `src/`.
+#
+# Directory layout (after the PHP/Rust split):
+#   src/   -> PHP plugin classes (PSR-4 namespace lychee\worker\)
+#   rust/  -> Rust PHP extension source (needed for cargo build)
+#   tests/ -> PHP + Rust tests (dev only, excluded from dist archives)
+
+# --- text / line endings -----------------------------------------------------
+* text=auto eol=lf
+*.rs  text eol=lf
+*.php text eol=lf
+*.sh  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md  text eol=lf
+
+# --- binary ------------------------------------------------------------------
+*.so   binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+
+# --- files excluded from composer/packagist archives -------------------------
+# `composer install` will produce a vendor/watsonhaw/lychee-worker/ directory
+# without the following files, saving bandwidth and reducing noise.
+
+# Developer-only content
+/.github/        export-ignore
+/.gitignore      export-ignore
+/.editorconfig   export-ignore
+/.vscode/        export-ignore
+
+# Build artifacts
+/target/         export-ignore
+
+# Tests (PHPUnit + Rust smoke tests)
+/tests/          export-ignore
+/phpunit.xml*    export-ignore
+
+# Version lock files (reproducibility tooling, not needed by end users)
+Cargo.lock       export-ignore

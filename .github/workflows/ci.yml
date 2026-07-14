@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-extension:
+    name: build (${{ matrix.os }} / PHP 8.3)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macOS-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: none
+          tools: composer:v2
+          coverage: none
+          ini-values: phar.readonly=Off
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-cargo
+          cache-on-failure: true
+
+      - name: cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test (release)
+        run: cargo test --release -- --nocapture
+
+      - name: cargo build (release)
+        run: cargo build --release --verbose
+
+      - name: Verify artifact
+        run: |
+          if   [ -f "target/release/liblychee_worker.so" ];   then EXT=target/release/liblychee_worker.so
+          elif [ -f "target/release/liblychee_worker.dylib" ]; then EXT=target/release/liblychee_worker.dylib
+          else echo "::error::Extension artifact not found"; exit 1
+          fi
+          ls -lh "$EXT"
+
+  php-quality:
+    name: php quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: none
+          tools: composer:v2
+          coverage: none
+
+      - name: composer install
+        run: composer install --no-progress --ansi
+
+      - name: composer check-style
+        run: composer check-style
+
+      - name: composer analyze
+        run: composer analyze
+
+      - name: composer test-php
+        run: composer test-php
+
+  metadata:
+    name: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+          coverage: none
+
+      - name: composer validate
+        run: composer validate --strict --no-check-publish
+
+      - name: install.sh syntax
+        run: bash -n scripts/install.sh

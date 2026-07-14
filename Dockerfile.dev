@@ -1,0 +1,54 @@
+# -----------------------------------------------------------------------------
+# Development Dockerfile — includes full toolchain, source code, and tests.
+#
+# Usage:
+#   docker build -t lychee-worker:dev -f Dockerfile.dev .
+#   docker run --rm -it -v $(pwd):/app -p 8000:8000 lychee-worker:dev bash
+# -----------------------------------------------------------------------------
+FROM rust:1.75-bookworm
+
+# System deps: PHP 8.3 from Debian repos + build tools + debugging tools
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        php8.2 \
+        php8.2-cli \
+        php8.2-dev \
+        php8.2-mbstring \
+        php8.2-xml \
+        curl \
+        git \
+        unzip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Composer
+COPY --from=composer:2.7 /usr/bin/composer /usr/bin/composer
+
+# PHP extension from PHP 8.3 upstream images use a different API version than
+# Debian packages. We rely on the system php8.2 here for development simplicity.
+# Override with a FROM php:8.3-cli-bookworm if you need a specific PHP version.
+
+WORKDIR /app
+COPY . /app
+
+# Install PHP dev dependencies (includes phpunit, phpstan, php-cs-fixer)
+RUN composer install --optimize-autoloader --no-interaction
+
+# Build the Rust extension in debug mode (faster build)
+RUN cargo build
+
+# Install the debug-build extension to PHP
+RUN EXT_DIR=$(php-config --extension-dir 2>/dev/null || php8.2-config --extension-dir) \
+    && cp target/debug/liblychee_worker.so "${EXT_DIR}/lychee_worker.so" \
+    && echo "extension=lychee_worker.so" > /etc/php/8.2/cli/conf.d/99-lychee_worker.ini
+
+# Verify
+RUN php8.2 -m | grep lychee_worker && echo "[dev] ✅ extension loaded (debug build)"
+
+# Helpful aliases
+RUN echo 'alias test="composer test"' >> /root/.bashrc \
+    && echo 'alias build="cargo build --release && cp target/release/liblychee_worker.so \$(php-config --extension-dir)/lychee_worker.so"' >> /root/.bashrc
+
+EXPOSE 8000
+
+CMD ["bash"]

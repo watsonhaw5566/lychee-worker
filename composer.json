@@ -1,0 +1,86 @@
+{
+  "name": "watsonhaw/lychee-worker",
+  "type": "library",
+  "extension-name": "lychee_worker",
+  "description": "Rust-powered high-performance runtime — prefork HTTP/WebSocket server with hot-reload",
+  "license": "MIT",
+  "keywords": [
+    "thinkphp",
+    "thinkphp8",
+    "worker",
+    "websocket",
+    "http-server",
+    "rust",
+    "php-extension",
+    "php-ext",
+    "ext-php-rs"
+  ],
+  "authors": [
+    {
+      "name": "watsonhaw",
+      "email": "348748267@qq.com"
+    }
+  ],
+  "require": {
+    "php": ">=8.3,<8.4"
+  },
+  "require-dev": {
+    "topthink/framework": "^8.0",
+    "phpunit/phpunit": "^10.0",
+    "guzzlehttp/guzzle": "^7.0",
+    "symfony/process": "^6.0|^7.0",
+    "ratchet/pawl": "^0.4.0",
+    "react/event-loop": "^1.0",
+    "watsonhaw/think-queue": "^1.0",
+    "phpstan/phpstan": "^2.2",
+    "friendsofphp/php-cs-fixer": "^3.95"
+  },
+  "autoload": {
+    "psr-4": {
+      "lychee\\worker\\": "src"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "lychee\\worker\\tests\\": "tests"
+    }
+  },
+  "extra": {
+    "think": {
+      "services": [
+        "lychee\\worker\\Service"
+      ],
+      "config": {
+        "worker": "src/config/worker.php"
+      }
+    }
+  },
+  "php-ext": {
+    "extension-name": "lychee_worker",
+    "build-system": "cargo",
+    "configure-options": [
+      {
+        "name": "enable-lychee-worker",
+        "type": "bool",
+        "default": true,
+        "description": "Enable the lychee_worker extension (Rust-powered runtime)"
+      }
+    ],
+    "php-versions": ["8.3"],
+    "operating-systems": ["Linux", "macOS"],
+    "architectures": ["x86_64", "arm64"]
+  },
+  "scripts": {
+    "build": "cargo build --release",
+    "install-ext": "bash scripts/install.sh",
+    "test": [
+      "@test-php",
+      "@test-rust"
+    ],
+    "test-php": "phpunit",
+    "test-rust": "cargo test --release",
+    "analyze": "phpstan --no-progress --memory-limit=1G",
+    "fix-style": "php-cs-fixer fix",
+    "check-style": "php-cs-fixer fix --dry-run"
+  }
+}

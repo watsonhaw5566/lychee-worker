@@ -1,0 +1,86 @@
+{
+    "name": "watsonhaw/lychee-worker",
+    "extension-name": "lychee_worker",
+    "type": "php-ext",
+    "version": "0.1.0",
+    "description": "Rust-powered high-performance runtime for lychee-worker — prefork HTTP/WebSocket server with hot-reload",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "watsonhaw",
+            "email": "348748267@qq.com"
+        }
+    ],
+    "php": {
+        "min-version": "8.3",
+        "max-version": "8.3"
+    },
+    "operating-systems": ["Linux", "macOS"],
+    "architectures": ["x86_64", "arm64"],
+    "thread-safety-modes": ["nts"],
+    "libc": ["glibc", "bsdlibc"],
+    "download-url-method": ["pre-packaged-binary", "composer-default"],
+    "build-system": "cargo",
+    "build": {
+        "commands": [
+            "cargo build --release"
+        ],
+        "output": {
+            "Linux": "target/release/liblychee_worker.so",
+            "macOS": "target/release/liblychee_worker.dylib"
+        }
+    },
+    "install": {
+        "script": "scripts/install.sh",
+        "copy-to": {
+            "Linux": "$(php-config --extension-dir)/lychee_worker.so",
+            "macOS": "$(php-config --extension-dir)/lychee_worker.dylib"
+        },
+        "enable-in-php-ini": true
+    },
+    "configure-options": [
+        {
+            "name": "enable-lychee-worker",
+            "type": "bool",
+            "default": true,
+            "description": "Enable the lychee_worker PHP extension (Rust-powered runtime)"
+        }
+    ],
+    "dependencies": {
+        "system": [
+            {
+                "name": "cargo",
+                "description": "Rust toolchain (rustc + cargo) 1.70+",
+                "install-hint": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+            },
+            {
+                "name": "clang",
+                "description": "C compiler (required by ext-php-rs bindgen to read PHP headers)"
+            }
+        ],
+        "php": {
+            "php-config": "php-config executable must be in PATH",
+            "phpize": "phpize must be in PATH (required by ext-php-rs to probe PHP version)"
+        }
+    },
+    "php-api": {
+        "functions": [
+            "lychee_worker_start",
+            "lychee_worker_ws_send",
+            "lychee_worker_ws_emit",
+            "lychee_worker_ws_broadcast",
+            "lychee_worker_ws_broadcast_all",
+            "lychee_worker_ws_broadcast_room",
+            "lychee_worker_join_room",
+            "lychee_worker_leave_room",
+            "lychee_worker_conn_rooms",
+            "lychee_worker_room_count",
+            "lychee_worker_stats",
+            "lychee_worker_trigger_reload",
+            "lychee_worker_stop"
+        ]
+    },
+    "stub-files": [
+        "stubs/lychee_worker.php"
+    ]
+}

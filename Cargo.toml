@@ -1,0 +1,37 @@
+[package]
+name = "lychee-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-powered high-performance runtime for ThinkPHP 8 — prefork HTTP/WebSocket server with hot-reload"
+license = "MIT"
+
+[lib]
+name = "lychee_worker"
+path = "rust/src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+ext-php-rs = { version = "0.15", features = ["closure"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+dashmap = "6"
+ctrlc = "3"
+socket2 = { version = "0.6.4", features = ["all"] }
+sha1 = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+incremental = false
+
+[profile.dev]
+opt-level = 1
+debug = 1
+incremental = true

@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts — we rebuild inside the container
+target/
+
+# PHP vendor and caches
+vendor/
+.phpunit.cache
+.php-cs-fixer.cache
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+runtime/
+
+# Docker files themselves
+Dockerfile
+Dockerfile.dev
+.dockerignore
+
+# README & docs (optional to exclude — they are small so we keep them)
+# README.md

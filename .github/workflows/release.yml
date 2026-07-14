@@ -1,0 +1,166 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-extension:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: none
+          tools: composer:v2
+          coverage: none
+          ini-values: phar.readonly=Off
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-cargo
+          cache-on-failure: true
+
+      - name: cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo build (release)
+        run: cargo build --release --verbose
+
+      - name: Detect OS / arch / libc for PIE pre-packaged-binary naming
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          PHP_VERSION="8.3"
+          ARCH="$(uname -m)"
+          # Normalize arch to x86_64 / arm64
+          case "$ARCH" in
+            x86_64|amd64) ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="arm64" ;;
+            *) echo "::error::unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            OS="Linux"
+            if ldd --version 2>/dev/null | grep -qi musl; then
+              LIBC="musl"
+            else
+              LIBC="glibc"
+            fi
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            OS="Darwin"
+            LIBC="bsdlibc"
+          else
+            echo "::error::unsupported os: $RUNNER_OS"
+            exit 1
+          fi
+          DEBUG="release"
+          TSMODE="nts"
+          # Full PIE pre-packaged-binary name:
+          # php_{ExtensionName}-{Version}_php{PhpVersion}-{Arch}-{OS}-{Libc}-{Debug}-{TSMode}.zip
+          ASSET_NAME="php_lychee_worker-${VERSION}_php${PHP_VERSION}-${ARCH}-${OS}-${LIBC}-${DEBUG}-${TSMODE}.zip"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+          echo "os=$OS" >> "$GITHUB_OUTPUT"
+          echo "libc=$LIBC" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME" >> "$GITHUB_OUTPUT"
+          echo "asset_stem=php_lychee_worker-${VERSION}_php${PHP_VERSION}-${ARCH}-${OS}-${LIBC}-${DEBUG}-${TSMODE}" >> "$GITHUB_OUTPUT"
+
+      - name: Normalize macOS artifact to .so
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ] && [ -f target/release/liblychee_worker.dylib ]; then
+            cp target/release/liblychee_worker.dylib target/release/liblychee_worker.so
+          fi
+
+      - name: Package PIE pre-packaged-binary ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING_DIR="dist/${{ steps.detect.outputs.asset_stem }}"
+          mkdir -p "$STAGING_DIR"
+          cp target/release/liblychee_worker.so "$STAGING_DIR/lychee_worker.so"
+          # On macOS also include the original .dylib for convenience
+          if [ "$RUNNER_OS" = "macOS" ] && [ -f target/release/liblychee_worker.dylib ]; then
+            cp target/release/liblychee_worker.dylib "$STAGING_DIR/lychee_worker.dylib"
+          fi
+          cp pie.json "$STAGING_DIR/"
+          cp scripts/install.sh "$STAGING_DIR/"
+          cd dist
+          zip -r "${{ steps.detect.outputs.asset_name }}" "${{ steps.detect.outputs.asset_stem }}"
+          ls -la "${{ steps.detect.outputs.asset_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.detect.outputs.asset_name }}
+          path: dist/${{ steps.detect.outputs.asset_name }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: liblychee_worker-${{ runner.os }}-${{ steps.detect.outputs.arch }}
+          path: target/release/liblychee_worker.so
+          if-no-files-found: error
+          retention-days: 90
+
+  metadata:
+    name: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer:v2
+          coverage: none
+
+      - name: composer validate
+        run: composer validate --strict --no-check-publish
+
+      - name: install.sh syntax
+        run: bash -n scripts/install.sh
+
+  release:
+    name: publish release artifacts
+    needs: [ build-extension, metadata ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/**/*.zip
+            dist/**/*.so
+            pie.json
+            composer.json
+            scripts/install.sh
