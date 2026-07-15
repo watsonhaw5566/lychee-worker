@@ -98,3 +98,10 @@ jobs:
 
       - name: install.sh syntax
         run: bash -n scripts/install.sh
+
+  all-checks:
+    name: all checks passed
+    needs: [build-extension, php-quality, metadata]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All required checks passed."
