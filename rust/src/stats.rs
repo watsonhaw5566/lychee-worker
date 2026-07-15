@@ -48,7 +48,7 @@ fn rss_linux_kb() -> Option<i64> {
     use std::io::{BufRead, BufReader};
 
     let file = File::open("/proc/self/status").ok()?;
-    for line in BufReader::new(file).lines().flatten() {
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // 形如 "VmRSS:\t   123456 kB"
             let num_str = rest
