@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-use crate::runtime::{CONNECTIONS, ROOMS, REQ_COUNT, WS_COUNT};
+use crate::runtime::{CONNECTIONS, REQ_COUNT, ROOMS, WS_COUNT};
 
 pub fn snapshot() -> HashMap<String, i64> {
     let mut map = HashMap::new();
@@ -11,7 +11,7 @@ pub fn snapshot() -> HashMap<String, i64> {
     let room_len = ROOMS.with(|map| map.len()) as i64;
     map.insert("connections".into(), conn_len);
     map.insert("ws".into(), WS_COUNT.load(Ordering::SeqCst));
-    map.insert("requests".into(), REQ_COUNT.load(Ordering::SeqCst) as i64);
+    map.insert("requests".into(), REQ_COUNT.load(Ordering::SeqCst));
     map.insert("rooms".into(), room_len);
 
     // 进程物理内存占用（单位：KB）
@@ -51,7 +51,9 @@ fn rss_linux_kb() -> Option<i64> {
     for line in BufReader::new(file).lines().flatten() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // 形如 "VmRSS:\t   123456 kB"
-            let num_str = rest.trim().trim_end_matches(|c: char| c.is_ascii_alphabetic() || c.is_whitespace());
+            let num_str = rest
+                .trim()
+                .trim_end_matches(|c: char| c.is_ascii_alphabetic() || c.is_whitespace());
             return num_str.trim().parse::<i64>().ok();
         }
     }

@@ -18,13 +18,10 @@ pub fn call_on_http(
         let path_s = path.to_string();
         let headers_s = headers.to_string();
         let body_s = body.to_string();
-        match h.try_call(vec![&method_s, &path_s, &headers_s, &body_s]) {
-            Ok(result) => {
-                if let Some(s) = result.string() {
-                    return s;
-                }
+        if let Ok(result) = h.try_call(vec![&method_s, &path_s, &headers_s, &body_s]) {
+            if let Some(s) = result.string() {
+                return s;
             }
-            Err(_) => {}
         }
     }
     format!(

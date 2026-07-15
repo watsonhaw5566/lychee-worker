@@ -67,36 +67,39 @@ pub async fn handle_upgrade(
 
     let conn_id_for_async = conn_id.clone();
     let local = tokio::task::LocalSet::new();
-    local.run_until(async move {
-        // 写入循环：接收来自 PHP 侧的推送消息
-        let writer = tokio::task::spawn_local(async move {
-            while let Some(msg) = rx.recv().await {
-                if write
-                    .send(Message::Text(
-                        String::from_utf8_lossy(&msg).into_owned().into(),
-                    ))
-                    .await
-                    .is_err()
-                {
-                    break;
+    local
+        .run_until(async move {
+            // 写入循环：接收来自 PHP 侧的推送消息
+            let writer = tokio::task::spawn_local(async move {
+                while let Some(msg) = rx.recv().await {
+                    if write
+                        .send(Message::Text(String::from_utf8_lossy(&msg).into_owned()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            }
-            let _ = write.close().await;
-        });
+                let _ = write.close().await;
+            });
 
-        // 读取循环：接收客户端消息 -> 转交 PHP 回调
-        let reader_conn_id = conn_id_for_async.clone();
-        let reader = tokio::task::spawn_local(async move {
-            while let Some(Ok(msg)) = read.next().await {
-                if let Message::Text(text) = msg {
-                    crate::php_api::call_on_ws_message(ws_message_handler, &reader_conn_id, &text);
+            // 读取循环：接收客户端消息 -> 转交 PHP 回调
+            let reader_conn_id = conn_id_for_async.clone();
+            let reader = tokio::task::spawn_local(async move {
+                while let Some(Ok(msg)) = read.next().await {
+                    if let Message::Text(text) = msg {
+                        crate::php_api::call_on_ws_message(
+                            ws_message_handler,
+                            &reader_conn_id,
+                            &text,
+                        );
+                    }
                 }
-            }
-        });
+            });
 
-        let _ = tokio::join!(reader, writer);
-    })
-    .await;
+            let _ = tokio::join!(reader, writer);
+        })
+        .await;
 
     // 清理连接
     cleanup_connection(&conn_id);
@@ -311,10 +314,7 @@ mod tests {
     fn compute_accept_matches_rfc6455_example() {
         // RFC 6455 Appendix B 的已知向量
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
-        assert_eq!(
-            compute_accept(key),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        );
+        assert_eq!(compute_accept(key), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
