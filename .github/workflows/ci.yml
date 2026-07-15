@@ -69,6 +69,16 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      - name: cache composer
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor
+            ~/.cache/composer
+          key: ${{ runner.os }}-php-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-composer-
+
       - name: composer install
         run: composer install --no-progress --ansi
 
@@ -92,6 +102,16 @@ jobs:
           php-version: "8.3"
           tools: composer:v2
           coverage: none
+
+      - name: cache composer
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor
+            ~/.cache/composer
+          key: ${{ runner.os }}-php-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-composer-
 
       - name: composer validate
         run: composer validate --strict --no-check-publish
