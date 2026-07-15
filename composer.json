@@ -1,7 +1,6 @@
 {
   "name": "watsonhaw/lychee-worker",
   "type": "library",
-  "extension-name": "lychee_worker",
   "description": "Rust-powered high-performance runtime — prefork HTTP/WebSocket server with hot-reload",
   "license": "MIT",
   "keywords": [
@@ -54,21 +53,6 @@
         "worker": "src/config/worker.php"
       }
     }
-  },
-  "php-ext": {
-    "extension-name": "lychee_worker",
-    "build-system": "cargo",
-    "configure-options": [
-      {
-        "name": "enable-lychee-worker",
-        "type": "bool",
-        "default": true,
-        "description": "Enable the lychee_worker extension (Rust-powered runtime)"
-      }
-    ],
-    "php-versions": ["8.3"],
-    "operating-systems": ["Linux", "macOS"],
-    "architectures": ["x86_64", "arm64"]
   },
   "scripts": {
     "build": "cargo build --release",
