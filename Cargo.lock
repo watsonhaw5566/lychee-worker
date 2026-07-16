@@ -944,6 +944,7 @@ dependencies = [
  "dashmap",
  "ext-php-rs",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
  "sha1 0.10.7",

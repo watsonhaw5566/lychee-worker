@@ -242,34 +242,49 @@ async fn handle_connection(
             }
         };
 
-        // 6) 解析 method/path/headers，调用 PHP 回调
+        // 6) 解析 method/path/headers
         let raw_headers = extract_headers_text(header_bytes);
         let (method, path) = parse_method_path(header_bytes);
+
+        // 6a) 准备 SSE 写入通道：dup socket fd 供 PHP 扩展同步写入
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe { crate::sse::set_stream_fd(stream.as_raw_fd()) };
+        }
+
+        // 7) 调用 PHP 回调
         let response =
             crate::php_api::call_on_http(*http_handler, &method, &path, &raw_headers, &body);
 
-        // 7) 请求计数 +1（修复原 REQ_COUNT 恒为 0 的问题）
+        // 8) 检查是否使用 SSE：使用了则跳过正常响应写入
+        let sse_used = crate::sse::was_sse_started();
+        crate::sse::clear_stream();
+
+        // 9) 请求计数 +1
         crate::runtime::REQ_COUNT.fetch_add(1, Ordering::SeqCst);
 
-        // 8) 写入响应（带超时保护）
-        match tokio::time::timeout(request_timeout, async {
-            stream.write_all(response.as_bytes()).await?;
-            stream.flush().await
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "response write timeout",
-                ));
+        // 10) SSE 模式下 PHP 已直接写数据，跳过；否则写响应
+        if !sse_used {
+            match tokio::time::timeout(request_timeout, async {
+                stream.write_all(response.as_bytes()).await?;
+                stream.flush().await
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "response write timeout",
+                    ));
+                }
             }
         }
 
-        // 9) keep-alive 决策：非 keep-alive 直接关闭连接
-        if !keep_alive {
+        // 11) keep-alive 决策：SSE 后直接关闭；其他按 Connection 头
+        if sse_used || !keep_alive {
             return Ok(());
         }
         // 继续循环，等待下一个请求
