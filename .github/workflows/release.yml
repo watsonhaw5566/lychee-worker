@@ -49,9 +49,8 @@ jobs:
         if: runner.os == 'Linux'
         run: bash -n scripts/install.sh
 
-      # ── 质量检查（仅 ubuntu 跑 PHP + Rust；macOS 只跑 Rust） ──
+      # ── 质量检查（ubuntu 跑 PHP + Rust；macOS 只跑 Rust） ──
       - name: composer install
-        if: runner.os == 'Linux'
         run: composer install --no-progress --ansi
 
       - name: composer check-style
