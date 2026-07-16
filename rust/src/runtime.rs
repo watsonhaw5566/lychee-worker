@@ -6,10 +6,10 @@
 //!   Queue 子进程 -> 跑纯 PHP 循环（php think worker:queue）消费队列任务
 //!
 
-use ext_php_rs::types::ZendCallable;
 use dashmap::DashMap;
+use ext_php_rs::types::ZendCallable;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 pub struct WorkerConfig {
     pub host: String,
@@ -81,7 +81,9 @@ pub struct RoomCell {
 
 impl RoomCell {
     pub fn new() -> Self {
-        Self { members: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            members: std::sync::Mutex::new(Vec::new()),
+        }
     }
 }
 
@@ -138,17 +140,19 @@ impl WorkerRuntime {
         let mut http_started = 0;
         for _ in 0..cfg.worker_num {
             if let Ok(child) = spawn_http_child(&cfg) {
-                children.lock().unwrap().push(TrackedChild { kind: ChildKind::Http, child });
+                children.lock().unwrap().push(TrackedChild {
+                    kind: ChildKind::Http,
+                    child,
+                });
                 http_started += 1;
             }
         }
         if http_started > 0 {
             println!(
-                "{:<10} {:<30} {:<8} {}",
+                "{:<10} {:<30} {:<8} [OK]",
                 "tcp",
                 format!("http://{}:{}", cfg.host, cfg.port),
                 1 + http_started,
-                "[OK]"
             );
         }
 
@@ -156,17 +160,19 @@ impl WorkerRuntime {
         let mut queue_started = 0;
         if cfg.enable_queue {
             if let Ok(child) = spawn_queue_child(&cfg) {
-                children.lock().unwrap().push(TrackedChild { kind: ChildKind::Queue, child });
+                children.lock().unwrap().push(TrackedChild {
+                    kind: ChildKind::Queue,
+                    child,
+                });
                 queue_started += 1;
             }
         }
         if queue_started > 0 {
             println!(
-                "{:<10} {:<30} {:<8} {}",
+                "{:<10} {:<30} {:<8} [OK]",
                 "unix",
                 "queue worker",
                 1 + queue_started,
-                "[OK]"
             );
         }
 
@@ -184,7 +190,12 @@ impl WorkerRuntime {
         // 监控目录的 mtime（带文件名模式匹配和 exclude 支持）
         let mut prev_mtime = HashMap::new();
         for dir in &cfg.watch_dirs {
-            scan_mtime(std::path::Path::new(dir), &cfg.watch_names, &cfg.watch_excludes, &mut prev_mtime);
+            scan_mtime(
+                std::path::Path::new(dir),
+                &cfg.watch_names,
+                &cfg.watch_excludes,
+                &mut prev_mtime,
+            );
         }
 
         loop {
@@ -197,21 +208,32 @@ impl WorkerRuntime {
             // 检查是否有文件变更
             let mut cur_mtime = HashMap::new();
             for dir in &cfg.watch_dirs {
-                scan_mtime(std::path::Path::new(dir), &cfg.watch_names, &cfg.watch_excludes, &mut cur_mtime);
+                scan_mtime(
+                    std::path::Path::new(dir),
+                    &cfg.watch_names,
+                    &cfg.watch_excludes,
+                    &mut cur_mtime,
+                );
             }
             let changed = cur_mtime.len() != prev_mtime.len()
-                || cur_mtime.iter().any(|(k, v)| prev_mtime.get(k).map_or(true, |old| old != v));
+                || cur_mtime.iter().any(|(k, v)| prev_mtime.get(k) != Some(v));
             if changed {
                 eprintln!("[lychee-worker] file changed, restarting");
                 kill_all_children(&children);
                 for _ in 0..cfg.worker_num {
                     if let Ok(child) = spawn_http_child(&cfg) {
-                        children.lock().unwrap().push(TrackedChild { kind: ChildKind::Http, child });
+                        children.lock().unwrap().push(TrackedChild {
+                            kind: ChildKind::Http,
+                            child,
+                        });
                     }
                 }
                 if cfg.enable_queue {
                     if let Ok(child) = spawn_queue_child(&cfg) {
-                        children.lock().unwrap().push(TrackedChild { kind: ChildKind::Queue, child });
+                        children.lock().unwrap().push(TrackedChild {
+                            kind: ChildKind::Queue,
+                            child,
+                        });
                     }
                 }
                 prev_mtime = cur_mtime;
@@ -307,14 +329,17 @@ fn reap_and_restart(
     let mut kept: Vec<TrackedChild> = Vec::with_capacity(guard.len());
     let mut to_restart: Vec<ChildKind> = Vec::new();
 
-    for tracked in std::mem::replace(&mut *guard, Vec::new()) {
+    for tracked in std::mem::take(&mut *guard) {
         let mut child = tracked.child;
         match child.try_wait() {
             Ok(Some(_)) => {
                 to_restart.push(tracked.kind);
             }
             _ => {
-                kept.push(TrackedChild { kind: tracked.kind, child });
+                kept.push(TrackedChild {
+                    kind: tracked.kind,
+                    child,
+                });
             }
         }
     }

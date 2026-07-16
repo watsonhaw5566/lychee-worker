@@ -26,7 +26,6 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
-          extensions: none
           tools: composer:v2
           coverage: none
           ini-values: phar.readonly=Off
@@ -67,9 +66,18 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
-          extensions: none
           tools: composer:v2
           coverage: none
+
+      - name: cache composer
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor
+            ~/.cache/composer
+          key: ${{ runner.os }}-php-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-composer-
 
       - name: composer install
         run: composer install --no-progress --ansi
@@ -95,8 +103,25 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      - name: cache composer
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor
+            ~/.cache/composer
+          key: ${{ runner.os }}-php-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-composer-
+
       - name: composer validate
         run: composer validate --strict --no-check-publish
 
       - name: install.sh syntax
         run: bash -n scripts/install.sh
+
+  all-checks:
+    name: all checks passed
+    needs: [build-extension, php-quality, metadata]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All required checks passed."

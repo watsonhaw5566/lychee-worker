@@ -13,7 +13,11 @@ pub fn probe_port(host: &str, port: u16) -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .map_err(|e: std::net::AddrParseError| e.to_string())?;
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))
         .map_err(|e| format!("socket: {}", e))?;
     let _ = socket.set_reuse_address(true);
@@ -31,7 +35,11 @@ pub fn probe_port(host: &str, port: u16) -> Result<(), String> {
 /// 以 SO_REUSEADDR + SO_REUSEPORT 的方式绑定端口，允许多个
 /// HTTP 子进程共享监听端口，从而由内核在进程间做负载均衡。
 fn bind_with_reuse(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
     let socket = Socket::new(domain, Type::STREAM, Some(socket2::Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     socket.set_reuse_port(true)?;
@@ -50,11 +58,12 @@ pub async fn serve<'a>(
     ws_message_handler: Option<&'a ZendCallable<'a>>,
     ws_close_handler: Option<&'a ZendCallable<'a>>,
 ) -> std::io::Result<()> {
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e: std::net::AddrParseError| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-        })?;
+    let addr: SocketAddr =
+        format!("{}:{}", host, port)
+            .parse()
+            .map_err(|e: std::net::AddrParseError| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+            })?;
     let listener = bind_with_reuse(addr)?;
 
     // 将回调引用泄露为 'static，以便在 tokio spawn_local 的任务中使用
@@ -65,26 +74,29 @@ pub async fn serve<'a>(
     let leaked_close = leak_callable(ws_close_handler);
 
     let local = tokio::task::LocalSet::new();
-    local.run_until(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _remote)) => {
-                    tokio::task::spawn_local(async move {
-                        let _ = handle_connection(
-                            stream,
-                            leaked_http,
-                            leaked_open,
-                            leaked_msg,
-                            leaked_close,
-                        ).await;
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[lychee-worker] accept error: {}", e);
+    local
+        .run_until(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _remote)) => {
+                        tokio::task::spawn_local(async move {
+                            let _ = handle_connection(
+                                stream,
+                                leaked_http,
+                                leaked_open,
+                                leaked_msg,
+                                leaked_close,
+                            )
+                            .await;
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[lychee-worker] accept error: {}", e);
+                    }
                 }
             }
-        }
-    }).await;
+        })
+        .await;
 
     Ok(())
 }
@@ -92,9 +104,11 @@ pub async fn serve<'a>(
 fn leak_callable<'a>(
     cb: Option<&'a ZendCallable<'a>>,
 ) -> &'static Option<&'static ZendCallable<'static>> {
-    let boxed: Box<Option<&'static ZendCallable<'static>>> = Box::new(
-        unsafe { std::mem::transmute::<Option<&'a ZendCallable<'a>>, Option<&'static ZendCallable<'static>>>(cb) },
-    );
+    let boxed: Box<Option<&'static ZendCallable<'static>>> = Box::new(unsafe {
+        std::mem::transmute::<Option<&'a ZendCallable<'a>>, Option<&'static ZendCallable<'static>>>(
+            cb,
+        )
+    });
     Box::leak(boxed)
 }
 
@@ -220,9 +234,10 @@ fn extract_headers_text(header_bytes: &[u8]) -> String {
         lines.remove(0);
     }
     // 去掉最后一个空元素（由末尾 \r\n\r\n 产生）
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
-        lines.pop();
-        if lines.is_empty() {
+    while let Some(last) = lines.last() {
+        if last.trim().is_empty() {
+            lines.pop();
+        } else {
             break;
         }
     }
@@ -236,7 +251,7 @@ fn parse_method_path(bytes: &[u8]) -> (String, String) {
         .map(|l| String::from_utf8_lossy(l).to_string())
         .unwrap_or_default();
     let parts: Vec<&str> = first_line.split_whitespace().collect();
-    let method = parts.get(0).copied().unwrap_or("GET").to_string();
+    let method = parts.first().copied().unwrap_or("GET").to_string();
     let path = parts.get(1).copied().unwrap_or("/").to_string();
     (method, path)
 }

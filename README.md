@@ -143,7 +143,7 @@ Release 页会同时挂出符合 PIE 命名规范的 ZIP 包，以及 `liblychee
 原始文件。只需：
 
 ```bash
-wget https://github.com/watsonhaw/lychee-worker/releases/latest/download/liblychee_worker-$(uname)-x86_64.so
+wget https://github.com/watsonhaw5566/lychee-worker/releases/latest/download/liblychee_worker-$(uname)-x86_64.so
 cp liblychee_worker-*.so "$(php-config --extension-dir)/lychee_worker.so"
 echo 'extension=lychee_worker.so' >> "$(php --ini | awk -F': ' '/Loaded Configuration File/ {print $2; exit}')"
 php -m | grep lychee_worker

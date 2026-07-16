@@ -14,10 +14,10 @@
 
 use ext_php_rs::builders::ModuleBuilder;
 use ext_php_rs::exception::PhpException;
-use ext_php_rs::types::{ZendCallable, Zval};
-use ext_php_rs::wrap_function;
 use ext_php_rs::php_function;
 use ext_php_rs::php_module;
+use ext_php_rs::types::{ZendCallable, Zval};
+use ext_php_rs::wrap_function;
 
 mod http;
 mod runtime;
@@ -36,6 +36,7 @@ fn parse_watch_list(s: &str) -> Vec<String> {
 }
 
 #[php_function]
+#[allow(clippy::too_many_arguments)]
 pub fn lychee_worker_start(
     host: String,
     port: i64,
@@ -58,8 +59,12 @@ pub fn lychee_worker_start(
     let ws_close_callable = ws_close_handler.and_then(|z| ZendCallable::new(z).ok());
 
     if !(0..=65535).contains(&port) {
-        let _ = PhpException::new("invalid port".to_string(), 0, ext_php_rs::zend::ce::exception())
-            .throw();
+        let _ = PhpException::new(
+            "invalid port".to_string(),
+            0,
+            ext_php_rs::zend::ce::exception(),
+        )
+        .throw();
         return false;
     }
     if worker_num < 1 {
