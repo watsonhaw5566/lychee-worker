@@ -50,7 +50,7 @@ for arg in "$@"; do
             echo "  --no-ini                    skip writing php.ini / conf.d"
             echo "  --ini=PATH                  write to a custom php.ini path"
             echo "  --from-github-release=TAG   download a prebuilt extension binary from"
-            echo "                              GitHub Release (e.g. '0.1.0' or 'latest')"
+            echo "                              GitHub Release (e.g. 'v0.1.0' or 'latest')"
             echo "                              instead of building from source with cargo"
             exit 0
             ;;
