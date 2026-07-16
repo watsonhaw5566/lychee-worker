@@ -99,7 +99,7 @@ download_prebuilt() {
             resolved_tag="$(wget -qO- "$latest_api" 2>/dev/null | grep -oP '(?<="tag_name": ")[^"]+' | head -n1 || true)"
         fi
         if [ -z "$resolved_tag" ]; then
-            echo "[install] failed to resolve 'latest' tag — please specify an explicit version, e.g. '0.1.0'." >&2
+            echo "[install] failed to resolve 'latest' tag — please specify an explicit version, e.g. 'v0.1.0'." >&2
             return 1
         fi
         echo "[install] resolved to tag: $resolved_tag"
