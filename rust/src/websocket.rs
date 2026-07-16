@@ -55,10 +55,9 @@ pub async fn handle_upgrade(
         return Ok(());
     }
 
-    // 从 PHP 配置中读取心跳参数（单位：秒）。
-    // 最小值保护：避免误填 0 导致死循环。
-    let ping_interval = Duration::from_secs(ping_interval_sec.max(1));
-    let ping_timeout = Duration::from_secs(ping_timeout_sec.max(1));
+    // 心跳参数规范化：最小值保护，避免误填 0 或负数导致死循环
+    let (ping_interval, ping_timeout) =
+        normalize_heartbeat_config(ping_interval_sec, ping_timeout_sec);
 
     // WebSocket 帧/消息大小保护（避免超大帧 OOM）
     #[allow(deprecated)]
@@ -190,6 +189,34 @@ fn extract_websocket_key(request: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 规范化 WebSocket 心跳参数，把"秒"级别的配置转换为
+/// `Duration`，并执行最小保护和合理性约束：
+///
+/// * 最小值保护：`ping_interval_sec` / `ping_timeout_sec` 不低于
+///   1 秒（避免误填 0 或负数导致死循环 / 永远不超时）。
+/// * 顺序约束：`ping_interval_sec` 必须严格小于 `ping_timeout_sec`；
+///   如果开发者把间隔设得大于等于超时，函数会自动把间隔缩小为
+///   `ping_timeout - 1` 秒（保证在超时前至少有一次 Ping 机会）。
+///
+/// 该函数为无副作用的纯函数，便于单元测试。
+fn normalize_heartbeat_config(
+    ping_interval_sec: u64,
+    ping_timeout_sec: u64,
+) -> (Duration, Duration) {
+    let interval = ping_interval_sec.max(1);
+    let timeout = ping_timeout_sec.max(1);
+
+    // 保证 interval < timeout：否则 Ping 发出去还没来得及收到 Pong 就超时。
+    // 缩减后再次 max(1) 保护，避免 timeout=1 时得到 interval=0。
+    let interval = if interval >= timeout {
+        (timeout - 1).max(1)
+    } else {
+        interval
+    };
+
+    (Duration::from_secs(interval), Duration::from_secs(timeout))
 }
 
 /// 计算 Sec-WebSocket-Accept 响应值
@@ -408,5 +435,67 @@ mod tests {
         // 事件名含引号时不能破坏外层 JSON 结构
         let payload = emit_payload("a\"b", "{\"x\":1}", 1);
         assert!(payload.contains("\"event\":\"a\\\"b\""));
+    }
+
+    // ─────── 心跳规范化相关测试 ───────
+
+    #[test]
+    fn heartbeat_normal_values_pass_through() {
+        // 正常配置：25s 间隔 / 60s 超时 → 直接透传
+        let (interval, timeout) = normalize_heartbeat_config(25, 60);
+        assert_eq!(interval.as_secs(), 25);
+        assert_eq!(timeout.as_secs(), 60);
+        assert!(interval < timeout);
+    }
+
+    #[test]
+    fn heartbeat_zero_interval_is_lifted_to_one() {
+        // 开发者误填 0 时应有保护，否则 interval=0 会变成无限循环发送 Ping
+        let (interval, timeout) = normalize_heartbeat_config(0, 60);
+        assert_eq!(interval.as_secs(), 1);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_zero_timeout_is_lifted_to_one() {
+        // 误填 timeout=0 → 保护到 1s
+        let (interval, timeout) = normalize_heartbeat_config(0, 0);
+        assert_eq!(interval.as_secs(), 1);
+        assert_eq!(timeout.as_secs(), 1);
+    }
+
+    #[test]
+    fn heartbeat_interval_greater_than_timeout_is_capped() {
+        // 异常配置：间隔 > 超时 → 自动把 interval 缩小到 timeout-1
+        let (interval, timeout) = normalize_heartbeat_config(120, 60);
+        assert!(interval < timeout, "interval 必须小于 timeout，否则心跳没有意义");
+        assert_eq!(interval.as_secs(), 59);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_interval_equal_to_timeout_is_capped() {
+        // 相等时也需要保证 interval < timeout
+        let (interval, timeout) = normalize_heartbeat_config(60, 60);
+        assert!(interval < timeout);
+        assert_eq!(interval.as_secs(), 59);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_production_defaults_match_config_file() {
+        // `config/worker.php` 默认值 (25, 60) 必须合法且 interval < timeout
+        let (interval, timeout) = normalize_heartbeat_config(25, 60);
+        assert!(interval < timeout);
+        assert_eq!(interval.as_secs(), 25);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_large_values_are_accepted() {
+        // 大配置不溢出、不报错
+        let (interval, timeout) = normalize_heartbeat_config(600, 3600);
+        assert_eq!(interval.as_secs(), 600);
+        assert_eq!(timeout.as_secs(), 3600);
     }
 }
