@@ -18,6 +18,15 @@ struct HandlerBundle {
     ws_close: &'static Option<&'static ZendCallable<'static>>,
 }
 
+// SAFETY:
+//   `ZendCallable` 内部只是指向 PHP 函数表的指针，进程生命周期内
+//   地址不变。我们通过 `runtime::PHP_CALL_LOCK` 全局互斥锁保证同一
+//   时刻只有一个线程进入 PHP 解释器，因此跨线程传递 `HandlerBundle`
+//   是安全的。没有这个 `Send` impl，`tokio::spawn` 无法用它（它
+//   要求 `Future: Send`）。
+unsafe impl Send for HandlerBundle {}
+unsafe impl Sync for HandlerBundle {}
+
 /// 在主循环启动前，对端口做一次快速的占用检测。
 /// 如果被占用则打印清晰的命令提示并返回 Err，从而避免父进程进入
 /// 无限重启循环。
@@ -95,48 +104,44 @@ pub async fn serve<'a>(
     let ping_interval = cfg.ping_interval_sec;
     let ping_timeout = cfg.ping_timeout_sec;
 
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _remote)) => {
-                        // 连接数上限检查：超限直接 503 关闭，避免耗尽资源
-                        let current =
-                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_add(1, Ordering::SeqCst) + 1;
-                        if current > max_connections {
-                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
-                            tokio::task::spawn_local(async move {
-                                let _ = reject_service_unavailable(stream).await;
-                            });
-                            continue;
-                        }
-
-                        tokio::task::spawn_local(async move {
-                            let result = handle_connection(
-                                stream,
-                                &handlers,
-                                request_timeout,
-                                header_max,
-                                body_max,
-                                ping_interval,
-                                ping_timeout,
-                            )
-                            .await;
-                            // 连接结束递减计数
-                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
-                            let _ = result;
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("[lychee-worker] accept error: {}", e);
-                    }
+    // 使用普通 tokio::spawn：`HandlerBundle` 现在是 Send，因此每个连接任务
+    // 可以被调度到任何 worker 线程上。当某个任务调用 `run_php_blocking`
+    // 被 PHP 阻塞时，tokio 会把其他 pending task 迁移到另一条 worker 线程，
+    // 保证该子进程的 WebSocket 心跳和其他 HTTP 请求不被卡住。
+    loop {
+        match listener.accept().await {
+            Ok((stream, _remote)) => {
+                // 连接数上限检查：超限直接 503 关闭，避免耗尽资源
+                let current = crate::runtime::ACTIVE_HTTP_CONNS.fetch_add(1, Ordering::SeqCst) + 1;
+                if current > max_connections {
+                    crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let _ = reject_service_unavailable(stream).await;
+                    });
+                    continue;
                 }
-            }
-        })
-        .await;
 
-    Ok(())
+                tokio::spawn(async move {
+                    let result = handle_connection(
+                        stream,
+                        handlers,
+                        request_timeout,
+                        header_max,
+                        body_max,
+                        ping_interval,
+                        ping_timeout,
+                    )
+                    .await;
+                    // 连接结束递减计数
+                    crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
+                    let _ = result;
+                });
+            }
+            Err(e) => {
+                eprintln!("[lychee-worker] accept error: {}", e);
+            }
+        }
+    }
 }
 
 /// 连接数上限时快速返回 503
@@ -170,7 +175,7 @@ fn leak_callable<'a>(
 
 async fn handle_connection(
     mut stream: TcpStream,
-    handlers: &HandlerBundle,
+    handlers: HandlerBundle,
     request_timeout: Duration,
     header_max: usize,
     body_max: usize,
@@ -207,9 +212,11 @@ async fn handle_connection(
             return crate::websocket::handle_upgrade(
                 stream,
                 &buf_full,
-                *handlers.ws_open,
-                *handlers.ws_message,
-                *handlers.ws_close,
+                crate::websocket::WsHandlerBundle {
+                    on_open: *handlers.ws_open,
+                    on_message: *handlers.ws_message,
+                    on_close: *handlers.ws_close,
+                },
                 ping_interval_sec,
                 ping_timeout_sec,
             )
@@ -258,9 +265,40 @@ async fn handle_connection(
             unsafe { crate::sse::set_stream_fd(stream.as_raw_fd()) };
         }
 
-        // 7) 调用 PHP 回调
-        let response =
-            crate::php_api::call_on_http(*handlers.http, &method, &path, &raw_headers, &body);
+        // 7) 调用 PHP 回调。
+        //    - `run_php_blocking` 把当前线程临时退出 reactor，
+        //      tokio 会在另一条 worker 线程上继续处理其他连接。
+        //    - `request_timeout` 外层保护：即使 PHP 内部无法被强制
+        //      中断，也能在超时后给客户端返回 504 Gateway Timeout，
+        //      同时释放本线程让其继续服务其他连接。
+        let http_handler = *handlers.http;
+        let method_c = method.clone();
+        let path_c = path.clone();
+        let response = match tokio::time::timeout(
+            request_timeout,
+            std::future::ready(crate::runtime::run_php_blocking(move || {
+                crate::php_api::call_on_http(http_handler, &method_c, &path_c, &raw_headers, &body)
+            })),
+        )
+        .await
+        {
+            Ok(resp) => resp,
+            Err(_) => {
+                eprintln!(
+                    "[lychee-worker] PHP handler timeout (>{:.0}s) for {} {}",
+                    request_timeout.as_secs_f64(),
+                    method,
+                    path
+                );
+                "HTTP/1.1 504 Gateway Timeout\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: 19\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 Gateway Timeout\n"
+                    .to_string()
+            }
+        };
 
         // 8) 检查是否使用 SSE：使用了则跳过正常响应写入
         let sse_used = crate::sse::was_sse_started();

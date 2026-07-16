@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use ext_php_rs::types::ZendCallable;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Mutex;
 
 pub struct WorkerConfig {
     pub host: String,
@@ -46,6 +47,40 @@ pub static ACTIVE_HTTP_CONNS: AtomicI64 = AtomicI64::new(0);
 
 /// 全局停止标志
 static STOP_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// PHP 调用全局互斥锁。
+///
+/// PHP 解释器（非 ZTS 构建）在同一进程内不能被多个线程并发调用，
+/// 否则会出现内存损坏。所有对 `ZendCallable::try_call` / ext-php-rs
+/// 的 PHP 回调都必须通过此锁串行化。
+static PHP_CALL_LOCK: Mutex<()> = Mutex::new(());
+
+/// 在 tokio 异步上下文中安全地执行一次 PHP 同步回调。
+///
+/// 工作方式：
+///   1. `tokio::task::block_in_place` —— 告诉 tokio 把当前线程临时
+///      退出 reactor 角色，由其他 worker 线程继续接管其他连接的
+///      I/O（accept、WebSocket ping/pong、SSE 写入等）。
+///   2. `PHP_CALL_LOCK.lock()` —— 同一时刻只允许一个线程进入 PHP
+///      解释器（非 ZTS 的硬性约束）。
+///
+/// 为什么不用 `spawn_blocking`？
+///   • `ext-php-rs` 的 `ZendCallable` 不是 `Send`，无法被送到
+///     另一个线程去调用；
+///   • `block_in_place` 在当前线程执行，PHP 仍在此线程被调用，
+///     但 tokio 会把此线程上其他 pending 的 reactor 工作迁移到
+///     其他 worker 线程。
+pub fn run_php_blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    tokio::task::block_in_place(|| {
+        let _guard = PHP_CALL_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f()
+    })
+}
 
 // 下面是实现细节：把 DashMap 封装成一个可控初始化的全局静态结构
 // （使用 OnceLock + 内部分配，避免复杂的 lazy_static）
@@ -258,7 +293,13 @@ impl WorkerRuntime {
         ws_message_handler: Option<&'a ZendCallable<'a>>,
         ws_close_handler: Option<&'a ZendCallable<'a>>,
     ) -> Result<(), String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        // 使用 multi_thread runtime：当某个任务在 `block_in_place` 中被
+        // PHP 阻塞时，tokio 会把其他 pending task 调度到另一条 worker
+        // 线程，从而保证该子进程的其他连接（WebSocket 心跳、新 accept、
+        // SSE 写入等）不被阻塞。
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(8)
             .enable_all()
             .build()
             .map_err(|e| format!("tokio build: {}", e))?;

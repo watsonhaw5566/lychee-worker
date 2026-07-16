@@ -20,12 +20,30 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::runtime::{CONNECTIONS, ROOMS, WS_COUNT};
 
+/// 一次性包装 3 个 WebSocket PHP 回调。
+///
+/// `ext-php-rs` 的 `ZendCallable` 不是 `Send`（内部是裸指针），
+/// 但我们通过 `runtime::PHP_CALL_LOCK` 保证同一时刻只有一个线程进入 PHP，
+/// 所以跨线程传递此 bundle 是安全的。
+#[derive(Copy, Clone)]
+pub(crate) struct WsHandlerBundle {
+    pub(crate) on_open: Option<&'static ZendCallable<'static>>,
+    pub(crate) on_message: Option<&'static ZendCallable<'static>>,
+    pub(crate) on_close: Option<&'static ZendCallable<'static>>,
+}
+
+// SAFETY: 与 `http.rs` 的 `HandlerBundle` 相同的理由。
+// `ZendCallable` 内部只是 PHP 函数表指针，进程内地址不变。
+// PHP 调用通过 `PHP_CALL_LOCK` 串行化。
+unsafe impl Send for WsHandlerBundle {}
+unsafe impl Sync for WsHandlerBundle {}
+
 pub async fn handle_upgrade(
     mut stream: TcpStream,
     pre_read: &[u8],
-    ws_open_handler: Option<&'static ZendCallable<'static>>,
-    ws_message_handler: Option<&'static ZendCallable<'static>>,
-    ws_close_handler: Option<&'static ZendCallable<'static>>,
+    // 直接接收 WsHandlerBundle（Send），
+    // 这样此函数返回的 future 也是 Send，可以被 tokio::spawn 调度。
+    handlers: WsHandlerBundle,
     ping_interval_sec: u64,
     ping_timeout_sec: u64,
 ) -> std::io::Result<()> {
@@ -87,8 +105,10 @@ pub async fn handle_upgrade(
     });
     WS_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // 通知 PHP 侧：新连接建立
-    crate::php_api::call_on_ws_open(ws_open_handler, &conn_id);
+    // 通知 PHP 侧：新连接建立（run_php_blocking 不阻塞 reactor）
+    crate::runtime::run_php_blocking(|| {
+        crate::php_api::call_on_ws_open(handlers.on_open, &conn_id);
+    });
 
     let (mut write, mut read) = ws.split();
 
@@ -125,19 +145,25 @@ pub async fn handle_upgrade(
                         last_msg_at = Instant::now(); // 刷新"最后消息时间"
                         match msg {
                             Message::Text(text) => {
-                                crate::php_api::call_on_ws_message(
-                                    ws_message_handler,
-                                    &conn_id,
-                                    &text,
-                                );
+                                // run_php_blocking：PHP 业务回调不阻塞本进程
+                                // 其他 WebSocket 连接的心跳和消息处理
+                                crate::runtime::run_php_blocking(|| {
+                                    crate::php_api::call_on_ws_message(
+                                        handlers.on_message,
+                                        &conn_id,
+                                        &text,
+                                    );
+                                });
                             }
                             Message::Binary(data) => {
                                 let payload = String::from_utf8(data).unwrap_or_default();
-                                crate::php_api::call_on_ws_message(
-                                    ws_message_handler,
-                                    &conn_id,
-                                    &payload,
-                                );
+                                crate::runtime::run_php_blocking(|| {
+                                    crate::php_api::call_on_ws_message(
+                                        handlers.on_message,
+                                        &conn_id,
+                                        &payload,
+                                    );
+                                });
                             }
                             Message::Ping(payload) => {
                                 if write.send(Message::Pong(payload)).await.is_err() {
@@ -173,7 +199,10 @@ pub async fn handle_upgrade(
 
     // 清理连接
     cleanup_connection(&conn_id);
-    crate::php_api::call_on_ws_close(ws_close_handler, &conn_id);
+    // close 回调同样通过 run_php_blocking 执行，保持一致
+    crate::runtime::run_php_blocking(|| {
+        crate::php_api::call_on_ws_close(handlers.on_close, &conn_id);
+    });
     Ok(())
 }
 
