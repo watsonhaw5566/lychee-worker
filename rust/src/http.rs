@@ -81,6 +81,8 @@ pub async fn serve<'a>(
     let max_connections = cfg.max_connections as i64;
     let header_max = cfg.header_max_bytes;
     let body_max = cfg.body_max_bytes;
+    let ping_interval = cfg.ping_interval_sec;
+    let ping_timeout = cfg.ping_timeout_sec;
 
     let local = tokio::task::LocalSet::new();
     local
@@ -109,6 +111,8 @@ pub async fn serve<'a>(
                                 request_timeout,
                                 header_max,
                                 body_max,
+                                ping_interval,
+                                ping_timeout,
                             )
                             .await;
                             // 连接结束递减计数
@@ -165,6 +169,8 @@ async fn handle_connection(
     request_timeout: Duration,
     header_max: usize,
     body_max: usize,
+    ping_interval_sec: u64,
+    ping_timeout_sec: u64,
 ) -> std::io::Result<()> {
     // 外循环：支持 HTTP keep-alive，一个 TCP 连接处理多个请求
     loop {
@@ -199,6 +205,8 @@ async fn handle_connection(
                 *ws_open_handler,
                 *ws_message_handler,
                 *ws_close_handler,
+                ping_interval_sec,
+                ping_timeout_sec,
             )
             .await;
         }
