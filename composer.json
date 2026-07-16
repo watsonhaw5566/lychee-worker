@@ -73,13 +73,13 @@
       "@fix-style-php",
       "@fix-style-rust"
     ],
-    "fix-style-php": "php-cs-fixer fix",
-    "fix-style-rust": "cargo fmt",
+    "fix-style-php": "php-cs-fixer fix --no-interaction --ansi",
+    "fix-style-rust": "cargo fmt --all",
     "check-style": [
       "@check-style-php",
       "@check-style-rust"
     ],
-    "check-style-php": "php-cs-fixer fix --dry-run",
-    "check-style-rust": "cargo fmt -- --check"
+    "check-style-php": "php-cs-fixer fix --dry-run --no-interaction --ansi",
+    "check-style-rust": "cargo fmt --all -- --check"
   }
 }
