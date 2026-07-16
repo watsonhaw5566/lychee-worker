@@ -57,6 +57,10 @@ class Manager
             );
         }
 
+        // MB → bytes，传给 Rust
+        $headerMaxBytes = ((int) $this->config['header_max_mb']) * 1024 * 1024;
+        $bodyMaxBytes   = ((int) $this->config['body_max_mb'])   * 1024 * 1024;
+
         return \lychee_worker_start(
             (string) $this->config['host'],
             (int)    $this->config['port'],
@@ -68,6 +72,10 @@ class Manager
             (int)    $this->config['watch_interval_ms'],
             (int)    $this->config['ping_interval_sec'],
             (int)    $this->config['ping_timeout_sec'],
+            (int)    $this->config['request_timeout_sec'],
+            (int)    $this->config['max_connections'],
+            $headerMaxBytes,
+            $bodyMaxBytes,
             $httpHandler,
             $wsOpenHandler,
             $wsMsgHandler,
@@ -97,16 +105,20 @@ class Manager
     protected function defaultConfig(): array
     {
         return [
-            'host'              => '0.0.0.0',
-            'port'              => 8080,
-            'worker_num'        => 2,
-            'enable_queue'      => false,
-            'watch_dirs'        => 'app,config,route',
-            'watch_names'       => '*.php',
-            'watch_excludes'    => 'runtime,vendor',
-            'watch_interval_ms' => 1000,
-            'ping_interval_sec' => 25,
-            'ping_timeout_sec'  => 60,
+            'host'                => '0.0.0.0',
+            'port'                => 8080,
+            'worker_num'          => 2,
+            'enable_queue'        => false,
+            'watch_dirs'          => 'app,config,route',
+            'watch_names'         => '*.php',
+            'watch_excludes'      => 'runtime,vendor',
+            'watch_interval_ms'   => 1000,
+            'ping_interval_sec'   => 25,
+            'ping_timeout_sec'    => 60,
+            'request_timeout_sec' => 60,
+            'max_connections'     => 1024,
+            'header_max_mb'       => 1,
+            'body_max_mb'         => 8,
         ];
     }
 }

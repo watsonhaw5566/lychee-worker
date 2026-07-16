@@ -32,20 +32,47 @@ jobs:
           ini-values: phar.readonly=Off
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-cargo
           cache-on-failure: true
 
-      - name: cargo fmt (check)
-        run: cargo fmt --all -- --check
+      # ── meta / 配置检查（仅 ubuntu，两个平台只需一次） ──
+      - name: composer validate
+        if: runner.os == 'Linux'
+        run: composer validate --strict --no-check-publish
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: install.sh syntax
+        if: runner.os == 'Linux'
+        run: bash -n scripts/install.sh
 
-      - name: cargo build (release)
-        run: cargo build --release --verbose
+      # ── 质量检查（仅 ubuntu 跑 PHP + Rust；macOS 只跑 Rust） ──
+      - name: composer install
+        if: runner.os == 'Linux'
+        run: composer install --no-progress --ansi
+
+      - name: composer check-style
+        if: runner.os == 'Linux'
+        run: composer check-style
+
+      - name: composer check-style-rust
+        if: runner.os == 'macOS'
+        run: composer check-style-rust
+
+      - name: composer analyze
+        if: runner.os == 'Linux'
+        run: composer analyze
+
+      - name: composer analyze-rust
+        if: runner.os == 'macOS'
+        run: composer analyze-rust
+
+      # ── 构建 ──────────────────────────────────────────────
+      - name: composer build
+        run: composer build
 
       - name: Detect OS / arch / libc for PIE pre-packaged-binary naming
         id: detect
@@ -124,27 +151,9 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  metadata:
-    name: metadata
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.3"
-          tools: composer:v2
-          coverage: none
-
-      - name: composer validate
-        run: composer validate --strict --no-check-publish
-
-      - name: install.sh syntax
-        run: bash -n scripts/install.sh
-
   release:
     name: publish release artifacts
-    needs: [ build-extension, metadata ]
+    needs: build-extension
     runs-on: ubuntu-latest
 
     steps:

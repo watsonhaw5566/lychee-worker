@@ -19,11 +19,17 @@ pub struct WorkerConfig {
     pub watch_names: Vec<String>,
     pub watch_excludes: Vec<String>,
     pub watch_interval_ms: u64,
-    #[allow(dead_code)]
     pub ping_interval_sec: u64,
-    #[allow(dead_code)]
     pub ping_timeout_sec: u64,
     pub enable_queue: bool,
+    /// 单个请求总超时（秒）：header/body/PHP 回调/响应写入
+    pub request_timeout_sec: u64,
+    /// 每个子进程最大并发连接数（超限直接 503）
+    pub max_connections: usize,
+    /// 请求 header 最大字节数
+    pub header_max_bytes: usize,
+    /// 请求 body 最大字节数（Content-Length 超限直接 413）
+    pub body_max_bytes: usize,
 }
 
 /// 进程全局连接表：ConnId -> tokio mpsc::UnboundedSender
@@ -35,6 +41,8 @@ pub static ROOMS: GlobalMap<DashMap<String, RoomCell>> = GlobalMap::new();
 /// 请求计数
 pub static REQ_COUNT: AtomicI64 = AtomicI64::new(0);
 pub static WS_COUNT: AtomicI64 = AtomicI64::new(0);
+/// 当前活跃 HTTP 连接数（用于 max_connections 限流）
+pub static ACTIVE_HTTP_CONNS: AtomicI64 = AtomicI64::new(0);
 
 /// 全局停止标志
 static STOP_FLAG: AtomicBool = AtomicBool::new(false);
@@ -256,12 +264,13 @@ impl WorkerRuntime {
             .map_err(|e| format!("tokio build: {}", e))?;
         rt.block_on(async move {
             crate::http::serve(
-                cfg.host,
+                cfg.host.clone(),
                 cfg.port,
                 http_handler,
                 ws_open_handler,
                 ws_message_handler,
                 ws_close_handler,
+                &cfg,
             )
             .await
             .map_err(|e| format!("http serve: {}", e))

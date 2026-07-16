@@ -63,8 +63,23 @@
     ],
     "test-php": "phpunit",
     "test-rust": "cargo test --release",
-    "analyze": "phpstan --no-progress --memory-limit=1G",
-    "fix-style": "php-cs-fixer fix",
-    "check-style": "php-cs-fixer fix --dry-run"
+    "analyze": [
+      "@analyze-php",
+      "@analyze-rust"
+    ],
+    "analyze-php": "phpstan --no-progress --memory-limit=1G",
+    "analyze-rust": "cargo clippy --all-targets -- -D warnings",
+    "fix-style": [
+      "@fix-style-php",
+      "@fix-style-rust"
+    ],
+    "fix-style-php": "php-cs-fixer fix --no-interaction --ansi",
+    "fix-style-rust": "cargo fmt --all",
+    "check-style": [
+      "@check-style-php",
+      "@check-style-rust"
+    ],
+    "check-style-php": "php-cs-fixer fix --dry-run --no-interaction --ansi",
+    "check-style-rust": "cargo fmt --all -- --check"
   }
 }

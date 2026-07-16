@@ -21,6 +21,7 @@ use ext_php_rs::wrap_function;
 
 mod http;
 mod runtime;
+mod sse;
 mod websocket;
 
 mod php_api;
@@ -48,6 +49,10 @@ pub fn lychee_worker_start(
     watch_interval_ms: i64,
     ping_interval_sec: i64,
     ping_timeout_sec: i64,
+    request_timeout_sec: i64,
+    max_connections: i64,
+    header_max_bytes: i64,
+    body_max_bytes: i64,
     http_handler: Option<&Zval>,
     ws_open_handler: Option<&Zval>,
     ws_message_handler: Option<&Zval>,
@@ -88,6 +93,11 @@ pub fn lychee_worker_start(
         ping_interval_sec: ping_interval_sec as u64,
         ping_timeout_sec: ping_timeout_sec as u64,
         enable_queue,
+        // 生产环境防护：最小值保护，避免误填 0 或负数
+        request_timeout_sec: request_timeout_sec.max(1) as u64,
+        max_connections: max_connections.max(1) as usize,
+        header_max_bytes: header_max_bytes.max(4096) as usize,
+        body_max_bytes: body_max_bytes.max(65536) as usize,
     };
 
     match crate::runtime::WorkerRuntime::run_blocking(
@@ -179,6 +189,29 @@ pub fn lychee_worker_stop() -> bool {
     true
 }
 
+/// 启动 Server-Sent Events 会话。写响应头并切换为 chunked 编码。
+/// 必须在同一个 HTTP 请求的 PHP 回调内调用。
+#[php_function]
+pub fn lychee_worker_sse_start() -> bool {
+    crate::sse::start()
+}
+
+/// 发送一条 SSE 事件。
+///
+/// # Arguments
+/// * `event` - 事件名（可为空，浏览器默认为 "message"）
+/// * `data` - 事件数据，支持多行（\n 分隔）
+#[php_function]
+pub fn lychee_worker_sse_send(event: String, data: String) -> bool {
+    crate::sse::send(event, data)
+}
+
+/// 结束 SSE 会话：写入 chunked 终止标记 `0\r\n\r\n` 并刷新缓冲。
+#[php_function]
+pub fn lychee_worker_sse_end() -> bool {
+    crate::sse::end()
+}
+
 /// 模块构建入口（ext-php-rs 0.15 要求使用 wrap_function 宏）。
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
@@ -196,4 +229,7 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(lychee_worker_stats))
         .function(wrap_function!(lychee_worker_trigger_reload))
         .function(wrap_function!(lychee_worker_stop))
+        .function(wrap_function!(lychee_worker_sse_start))
+        .function(wrap_function!(lychee_worker_sse_send))
+        .function(wrap_function!(lychee_worker_sse_end))
 }

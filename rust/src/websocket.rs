@@ -1,10 +1,20 @@
-//! WebSocket 协议处理：升级握手、连接管理、房间广播、消息回调。
+//! WebSocket 协议处理：升级握手、连接管理、房间广播、消息回调、**心跳检测**。
+//!
+//! 心跳策略（使用配置文件中的 `ping_interval_sec` / `ping_timeout_sec`）：
+//!   1. 服务器定期（`ping_interval_sec`）向客户端发送 Ping 帧
+//!   2. 任何收到的帧（Text/Ping/Pong/Binary/Close）都会刷新"最后消息时间戳"
+//!   3. 若在 `ping_timeout_sec` 内没有收到任何消息 → 视为连接断开，主动关闭
+//!
+//! 客户端表现符合 RFC 6455：浏览器的 WebSocket API 会自动回复 Pong。
 
 use ext_php_rs::types::ZendCallable;
 use futures_util::{SinkExt, StreamExt};
 use sha1::{Digest, Sha1};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::time::interval;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -16,6 +26,8 @@ pub async fn handle_upgrade(
     ws_open_handler: Option<&'static ZendCallable<'static>>,
     ws_message_handler: Option<&'static ZendCallable<'static>>,
     ws_close_handler: Option<&'static ZendCallable<'static>>,
+    ping_interval_sec: u64,
+    ping_timeout_sec: u64,
 ) -> std::io::Result<()> {
     // 从预读取的 HTTP 请求中提取 Sec-WebSocket-Key
     let request_text = String::from_utf8_lossy(pre_read);
@@ -43,11 +55,26 @@ pub async fn handle_upgrade(
         return Ok(());
     }
 
+    // 心跳参数规范化：最小值保护，避免误填 0 或负数导致死循环
+    let (ping_interval, ping_timeout) =
+        normalize_heartbeat_config(ping_interval_sec, ping_timeout_sec);
+
+    // WebSocket 帧/消息大小保护（避免超大帧 OOM）
+    #[allow(deprecated)]
+    let ws_config = WebSocketConfig {
+        max_send_queue: None,
+        max_message_size: Some(32 * 1024 * 1024),
+        max_frame_size: Some(16 * 1024 * 1024),
+        max_write_buffer_size: 64 * 1024 * 1024,
+        write_buffer_size: 128 * 1024,
+        accept_unmasked_frames: false,
+    };
+
     // 握手完成，交给 tungstenite 处理帧
     let ws = WebSocketStream::from_raw_socket(
         stream,
         tokio_tungstenite::tungstenite::protocol::Role::Server,
-        None,
+        Some(ws_config),
     )
     .await;
 
@@ -65,41 +92,84 @@ pub async fn handle_upgrade(
 
     let (mut write, mut read) = ws.split();
 
-    let conn_id_for_async = conn_id.clone();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async move {
-            // 写入循环：接收来自 PHP 侧的推送消息
-            let writer = tokio::task::spawn_local(async move {
-                while let Some(msg) = rx.recv().await {
-                    if write
-                        .send(Message::Text(String::from_utf8_lossy(&msg).into_owned()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                let _ = write.close().await;
-            });
+    // 主循环：用 tokio::select! 同时等待
+    //   ① PHP 侧的推送消息 → write
+    //   ② 客户端发来的帧 → read
+    //   ③ 定期发送 Ping
+    //   ④ 超时检测（超过 ping_timeout_sec 未收到任何消息 → 关闭）
+    let mut last_msg_at = Instant::now();
+    let mut ping_tick = interval(ping_interval);
 
-            // 读取循环：接收客户端消息 -> 转交 PHP 回调
-            let reader_conn_id = conn_id_for_async.clone();
-            let reader = tokio::task::spawn_local(async move {
-                while let Some(Ok(msg)) = read.next().await {
-                    if let Message::Text(text) = msg {
-                        crate::php_api::call_on_ws_message(
-                            ws_message_handler,
-                            &reader_conn_id,
-                            &text,
-                        );
+    loop {
+        tokio::select! {
+            // ① PHP 侧推送消息
+            maybe_msg = rx.recv() => {
+                match maybe_msg {
+                    Some(msg) => {
+                        if write
+                            .send(Message::Text(String::from_utf8_lossy(&msg).into_owned()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
+                    None => break, // 发送端被外部关闭（例如 PHP 主动踢下线）
                 }
-            });
+            }
 
-            let _ = tokio::join!(reader, writer);
-        })
-        .await;
+            // ② 客户端发来的帧
+            maybe_frame = read.next() => {
+                match maybe_frame {
+                    Some(Ok(msg)) => {
+                        last_msg_at = Instant::now(); // 刷新"最后消息时间"
+                        match msg {
+                            Message::Text(text) => {
+                                crate::php_api::call_on_ws_message(
+                                    ws_message_handler,
+                                    &conn_id,
+                                    &text,
+                                );
+                            }
+                            Message::Binary(data) => {
+                                let payload = String::from_utf8(data).unwrap_or_default();
+                                crate::php_api::call_on_ws_message(
+                                    ws_message_handler,
+                                    &conn_id,
+                                    &payload,
+                                );
+                            }
+                            Message::Ping(payload) => {
+                                if write.send(Message::Pong(payload)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Message::Pong(_) => {}
+                            Message::Close(_) => {
+                                let _ = write.close().await;
+                                break;
+                            }
+                            _ => {} // 忽略未识别的帧类型（例如底层的 Frame）
+                        }
+                    }
+                    Some(Err(_)) => break,
+                    None => break,
+                }
+            }
+
+            // ③ 定期发送 Ping
+            _ = ping_tick.tick() => {
+                if write.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+
+            // ④ 超时检测：从"最后消息时间"起算，超过 ping_timeout 视为断连
+            _ = tokio::time::sleep_until((last_msg_at + ping_timeout).into()) => {
+                break;
+            }
+        }
+    }
 
     // 清理连接
     cleanup_connection(&conn_id);
@@ -119,6 +189,34 @@ fn extract_websocket_key(request: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 规范化 WebSocket 心跳参数，把"秒"级别的配置转换为
+/// `Duration`，并执行最小保护和合理性约束：
+///
+/// * 最小值保护：`ping_interval_sec` / `ping_timeout_sec` 不低于
+///   1 秒（避免误填 0 或负数导致死循环 / 永远不超时）。
+/// * 顺序约束：`ping_interval_sec` 必须严格小于 `ping_timeout_sec`；
+///   如果开发者把间隔设得大于等于超时，函数会自动把间隔缩小为
+///   `ping_timeout - 1` 秒（保证在超时前至少有一次 Ping 机会）。
+///
+/// 该函数为无副作用的纯函数，便于单元测试。
+fn normalize_heartbeat_config(
+    ping_interval_sec: u64,
+    ping_timeout_sec: u64,
+) -> (Duration, Duration) {
+    let interval = ping_interval_sec.max(1);
+    let timeout = ping_timeout_sec.max(1);
+
+    // 保证 interval < timeout：否则 Ping 发出去还没来得及收到 Pong 就超时。
+    // 缩减后再次 max(1) 保护，避免 timeout=1 时得到 interval=0。
+    let interval = if interval >= timeout {
+        (timeout - 1).max(1)
+    } else {
+        interval
+    };
+
+    (Duration::from_secs(interval), Duration::from_secs(timeout))
 }
 
 /// 计算 Sec-WebSocket-Accept 响应值
@@ -337,5 +435,70 @@ mod tests {
         // 事件名含引号时不能破坏外层 JSON 结构
         let payload = emit_payload("a\"b", "{\"x\":1}", 1);
         assert!(payload.contains("\"event\":\"a\\\"b\""));
+    }
+
+    // ─────── 心跳规范化相关测试 ───────
+
+    #[test]
+    fn heartbeat_normal_values_pass_through() {
+        // 正常配置：25s 间隔 / 60s 超时 → 直接透传
+        let (interval, timeout) = normalize_heartbeat_config(25, 60);
+        assert_eq!(interval.as_secs(), 25);
+        assert_eq!(timeout.as_secs(), 60);
+        assert!(interval < timeout);
+    }
+
+    #[test]
+    fn heartbeat_zero_interval_is_lifted_to_one() {
+        // 开发者误填 0 时应有保护，否则 interval=0 会变成无限循环发送 Ping
+        let (interval, timeout) = normalize_heartbeat_config(0, 60);
+        assert_eq!(interval.as_secs(), 1);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_zero_timeout_is_lifted_to_one() {
+        // 误填 timeout=0 → 保护到 1s
+        let (interval, timeout) = normalize_heartbeat_config(0, 0);
+        assert_eq!(interval.as_secs(), 1);
+        assert_eq!(timeout.as_secs(), 1);
+    }
+
+    #[test]
+    fn heartbeat_interval_greater_than_timeout_is_capped() {
+        // 异常配置：间隔 > 超时 → 自动把 interval 缩小到 timeout-1
+        let (interval, timeout) = normalize_heartbeat_config(120, 60);
+        assert!(
+            interval < timeout,
+            "interval 必须小于 timeout，否则心跳没有意义"
+        );
+        assert_eq!(interval.as_secs(), 59);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_interval_equal_to_timeout_is_capped() {
+        // 相等时也需要保证 interval < timeout
+        let (interval, timeout) = normalize_heartbeat_config(60, 60);
+        assert!(interval < timeout);
+        assert_eq!(interval.as_secs(), 59);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_production_defaults_match_config_file() {
+        // `config/worker.php` 默认值 (25, 60) 必须合法且 interval < timeout
+        let (interval, timeout) = normalize_heartbeat_config(25, 60);
+        assert!(interval < timeout);
+        assert_eq!(interval.as_secs(), 25);
+        assert_eq!(timeout.as_secs(), 60);
+    }
+
+    #[test]
+    fn heartbeat_large_values_are_accepted() {
+        // 大配置不溢出、不报错
+        let (interval, timeout) = normalize_heartbeat_config(600, 3600);
+        assert_eq!(interval.as_secs(), 600);
+        assert_eq!(timeout.as_secs(), 3600);
     }
 }
