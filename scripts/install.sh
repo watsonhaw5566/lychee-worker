@@ -50,7 +50,7 @@ for arg in "$@"; do
             echo "  --no-ini                    skip writing php.ini / conf.d"
             echo "  --ini=PATH                  write to a custom php.ini path"
             echo "  --from-github-release=TAG   download a prebuilt extension binary from"
-            echo "                              GitHub Release (e.g. 'v0.1.0' or 'latest')"
+            echo "                              GitHub Release (e.g. '0.1.0' or 'latest')"
             echo "                              instead of building from source with cargo"
             exit 0
             ;;
@@ -99,7 +99,7 @@ download_prebuilt() {
             resolved_tag="$(wget -qO- "$latest_api" 2>/dev/null | grep -oP '(?<="tag_name": ")[^"]+' | head -n1 || true)"
         fi
         if [ -z "$resolved_tag" ]; then
-            echo "[install] failed to resolve 'latest' tag — please specify an explicit version, e.g. 'v0.1.0'." >&2
+            echo "[install] failed to resolve 'latest' tag — please specify an explicit version, e.g. '0.1.0'." >&2
             return 1
         fi
         echo "[install] resolved to tag: $resolved_tag"
