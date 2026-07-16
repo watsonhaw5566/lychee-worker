@@ -230,17 +230,25 @@ class Server extends Command
         $wsCloseHandler = function (string $connId): void {
         };
 
+        // MB → bytes，传给 Rust
+        $headerMaxBytes = ((int) $config['header_max_mb']) * 1024 * 1024;
+        $bodyMaxBytes   = ((int) $config['body_max_mb'])   * 1024 * 1024;
+
         \lychee_worker_start(
             $config['host'],
-            $config['port'],
-            $config['worker_num'],
+            (int) $config['port'],
+            (int) $config['worker_num'],
             $config['enable_queue'],
             $config['watch_dirs'],
             $config['watch_names'],
             $config['watch_excludes'],
-            $config['watch_interval_ms'],
-            $config['ping_interval_sec'],
-            $config['ping_timeout_sec'],
+            (int) $config['watch_interval_ms'],
+            (int) $config['ping_interval_sec'],
+            (int) $config['ping_timeout_sec'],
+            (int) $config['request_timeout_sec'],
+            (int) $config['max_connections'],
+            $headerMaxBytes,
+            $bodyMaxBytes,
             $httpHandler,
             $wsOpenHandler,
             $wsMsgHandler,

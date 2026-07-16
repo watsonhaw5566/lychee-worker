@@ -64,7 +64,7 @@
     "test-php": "phpunit",
     "test-rust": "cargo test --release",
     "analyze": "phpstan --no-progress --memory-limit=1G",
-    "fix-style": "php-cs-fixer fix",
+    "fix-style": "php-cs-fixer fix && cargo fmt",
     "check-style": "php-cs-fixer fix --dry-run"
   }
 }

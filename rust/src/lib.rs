@@ -48,6 +48,10 @@ pub fn lychee_worker_start(
     watch_interval_ms: i64,
     ping_interval_sec: i64,
     ping_timeout_sec: i64,
+    request_timeout_sec: i64,
+    max_connections: i64,
+    header_max_bytes: i64,
+    body_max_bytes: i64,
     http_handler: Option<&Zval>,
     ws_open_handler: Option<&Zval>,
     ws_message_handler: Option<&Zval>,
@@ -88,6 +92,11 @@ pub fn lychee_worker_start(
         ping_interval_sec: ping_interval_sec as u64,
         ping_timeout_sec: ping_timeout_sec as u64,
         enable_queue,
+        // 生产环境防护：最小值保护，避免误填 0 或负数
+        request_timeout_sec: request_timeout_sec.max(1) as u64,
+        max_connections: max_connections.max(1) as usize,
+        header_max_bytes: header_max_bytes.max(4096) as usize,
+        body_max_bytes: body_max_bytes.max(65536) as usize,
     };
 
     match crate::runtime::WorkerRuntime::run_blocking(

@@ -1,8 +1,11 @@
 //! HTTP 处理器：解析请求 -> 调用 PHP 侧回调 -> 返回响应。
 
+use crate::runtime::WorkerConfig;
 use ext_php_rs::types::ZendCallable;
 use socket2::{Domain, Socket, Type};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -57,6 +60,7 @@ pub async fn serve<'a>(
     ws_open_handler: Option<&'a ZendCallable<'a>>,
     ws_message_handler: Option<&'a ZendCallable<'a>>,
     ws_close_handler: Option<&'a ZendCallable<'a>>,
+    cfg: &'a WorkerConfig,
 ) -> std::io::Result<()> {
     let addr: SocketAddr =
         format!("{}:{}", host, port)
@@ -67,11 +71,16 @@ pub async fn serve<'a>(
     let listener = bind_with_reuse(addr)?;
 
     // 将回调引用泄露为 'static，以便在 tokio spawn_local 的任务中使用
-    // 子进程在退出前会一直持有这些引用，因此是安全的
     let leaked_http = leak_callable(http_handler);
     let leaked_open = leak_callable(ws_open_handler);
     let leaked_msg = leak_callable(ws_message_handler);
     let leaked_close = leak_callable(ws_close_handler);
+
+    // 从配置中提取运行参数
+    let request_timeout = Duration::from_secs(cfg.request_timeout_sec);
+    let max_connections = cfg.max_connections as i64;
+    let header_max = cfg.header_max_bytes;
+    let body_max = cfg.body_max_bytes;
 
     let local = tokio::task::LocalSet::new();
     local
@@ -79,15 +88,32 @@ pub async fn serve<'a>(
             loop {
                 match listener.accept().await {
                     Ok((stream, _remote)) => {
+                        // 连接数上限检查：超限直接 503 关闭，避免耗尽资源
+                        let current =
+                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_add(1, Ordering::SeqCst) + 1;
+                        if current > max_connections {
+                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
+                            tokio::task::spawn_local(async move {
+                                let _ = reject_service_unavailable(stream).await;
+                            });
+                            continue;
+                        }
+
                         tokio::task::spawn_local(async move {
-                            let _ = handle_connection(
+                            let result = handle_connection(
                                 stream,
                                 leaked_http,
                                 leaked_open,
                                 leaked_msg,
                                 leaked_close,
+                                request_timeout,
+                                header_max,
+                                body_max,
                             )
                             .await;
+                            // 连接结束递减计数
+                            crate::runtime::ACTIVE_HTTP_CONNS.fetch_sub(1, Ordering::SeqCst);
+                            let _ = result;
                         });
                     }
                     Err(e) => {
@@ -98,6 +124,24 @@ pub async fn serve<'a>(
         })
         .await;
 
+    Ok(())
+}
+
+/// 连接数上限时快速返回 503
+async fn reject_service_unavailable(mut stream: TcpStream) -> std::io::Result<()> {
+    let body =
+        b"<html><body><h1>503 Service Unavailable</h1><p>Too many connections.</p></body></html>";
+    let response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(5), async move {
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(body).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))?;
     Ok(())
 }
 
@@ -118,76 +162,205 @@ async fn handle_connection(
     ws_open_handler: &'static Option<&'static ZendCallable<'static>>,
     ws_message_handler: &'static Option<&'static ZendCallable<'static>>,
     ws_close_handler: &'static Option<&'static ZendCallable<'static>>,
+    request_timeout: Duration,
+    header_max: usize,
+    body_max: usize,
 ) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 32768];
+    // 外循环：支持 HTTP keep-alive，一个 TCP 连接处理多个请求
+    loop {
+        // 1) 读取 header（带超时保护）
+        let buf_full =
+            match tokio::time::timeout(request_timeout, read_http_headers(&mut stream, header_max))
+                .await
+            {
+                Ok(Ok(v)) => {
+                    if v.is_empty() {
+                        return Ok(()); // EOF：客户端关闭
+                    }
+                    v
+                }
+                Ok(Err(_)) => {
+                    let _ = write_simple_response(&mut stream, 400, "Bad Request", "").await;
+                    return Ok(());
+                }
+                Err(_) => {
+                    let _ = write_simple_response(&mut stream, 408, "Request Timeout", "").await;
+                    return Ok(());
+                }
+            };
+
+        // 2) WebSocket 升级判定
+        let head_preview = &buf_full[..buf_full.len().min(1024)];
+        let head_str = String::from_utf8_lossy(head_preview).to_string();
+        if head_str.to_lowercase().contains("upgrade: websocket") {
+            return crate::websocket::handle_upgrade(
+                stream,
+                &buf_full,
+                *ws_open_handler,
+                *ws_message_handler,
+                *ws_close_handler,
+            )
+            .await;
+        }
+
+        // 3) 解析 header 结束位置
+        let header_end = match buf_full.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => p + 4,
+            None => {
+                let _ = write_simple_response(&mut stream, 400, "Bad Request", "").await;
+                return Ok(());
+            }
+        };
+        let header_bytes = &buf_full[..header_end];
+
+        // 4) 判断是否 keep-alive
+        let keep_alive = wants_keep_alive(header_bytes);
+
+        // 5) 读取 body（带超时和大小限制）
+        let body = match tokio::time::timeout(
+            request_timeout,
+            read_body(header_bytes, &mut stream, &buf_full[header_end..], body_max),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            Ok(Err(_)) => {
+                let _ = write_simple_response(&mut stream, 413, "Payload Too Large", "").await;
+                return Ok(());
+            }
+            Err(_) => {
+                let _ = write_simple_response(&mut stream, 408, "Request Timeout", "").await;
+                return Ok(());
+            }
+        };
+
+        // 6) 解析 method/path/headers，调用 PHP 回调
+        let raw_headers = extract_headers_text(header_bytes);
+        let (method, path) = parse_method_path(header_bytes);
+        let response =
+            crate::php_api::call_on_http(*http_handler, &method, &path, &raw_headers, &body);
+
+        // 7) 请求计数 +1（修复原 REQ_COUNT 恒为 0 的问题）
+        crate::runtime::REQ_COUNT.fetch_add(1, Ordering::SeqCst);
+
+        // 8) 写入响应（带超时保护）
+        match tokio::time::timeout(request_timeout, async {
+            stream.write_all(response.as_bytes()).await?;
+            stream.flush().await
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "response write timeout",
+                ));
+            }
+        }
+
+        // 9) keep-alive 决策：非 keep-alive 直接关闭连接
+        if !keep_alive {
+            return Ok(());
+        }
+        // 继续循环，等待下一个请求
+    }
+}
+
+/// 从 stream 读取 HTTP header，直到遇到 \r\n\r\n 或达到 header_max
+async fn read_http_headers(stream: &mut TcpStream, header_max: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf: Vec<u8> = vec![0u8; 32768.min(header_max + 4096)];
     let mut total: usize = 0;
     loop {
+        if total >= buf.len() {
+            if buf.len() >= header_max {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "header too large",
+                ));
+            }
+            let new_cap = (buf.len() * 2).min(header_max + 4096);
+            buf.resize(new_cap, 0);
+        }
         let n = stream.read(&mut buf[total..]).await?;
         if n == 0 {
+            if total == 0 {
+                return Ok(Vec::new());
+            }
             break;
         }
         total += n;
         if total >= 4 {
-            let head = &buf[..total];
-            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let search_end = total.min(header_max);
+            if buf[..search_end].windows(4).any(|w| w == b"\r\n\r\n") {
                 break;
             }
         }
-        if total >= 1_048_576 {
-            break;
+        if total >= header_max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "header too large",
+            ));
         }
     }
-    if total == 0 {
-        return Ok(());
+    buf.truncate(total);
+    Ok(buf)
+}
+
+/// 判断请求是否希望保持连接（HTTP/1.1 默认 keep-alive，显式 Connection: close 则关闭）
+fn wants_keep_alive(header_bytes: &[u8]) -> bool {
+    let first_line = header_bytes
+        .split(|b| *b == b'\n')
+        .next()
+        .map(|l| String::from_utf8_lossy(l).to_string())
+        .unwrap_or_default();
+    let is_http_1_1 = first_line.to_ascii_lowercase().contains("http/1.1");
+
+    for line in header_bytes.split(|b| *b == b'\n') {
+        let line_str = String::from_utf8_lossy(line);
+        let trimmed = line_str.trim_end_matches('\r');
+        if trimmed.to_ascii_lowercase().starts_with("connection:") {
+            let value = trimmed["connection:".len()..].trim().to_ascii_lowercase();
+            return value.contains("keep-alive") && !value.contains("close");
+        }
     }
-    let head_str = String::from_utf8_lossy(&buf[..total.min(1024)]).to_string();
-    if head_str.to_lowercase().contains("upgrade: websocket") {
-        // HTTP 握手请求已经被读入 buf 中，不能让 tungstenite 的
-        // from_raw_socket 再去 stream 上读取一次（会读到 EOF）。
-        // 把已读取的 bytes 重新注入到 stream 之前，再交给 WebSocket
-        // 处理循环。
-        return crate::websocket::handle_upgrade(
-            stream,
-            &buf[..total],
-            *ws_open_handler,
-            *ws_message_handler,
-            *ws_close_handler,
-        )
-        .await;
-    }
-    // 找到 header 结束位置
-    let header_end = buf[..total]
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-        .unwrap_or(total);
-    let header_bytes = &buf[..header_end];
+    is_http_1_1
+}
 
-    // 读取请求体（根据 Content-Length）
-    let body = read_body(header_bytes, &mut stream, &buf[header_end..total]).await?;
-
-    // 提取 header 文本（不包含第一行请求行）
-    let raw_headers = extract_headers_text(header_bytes);
-
-    let (method, path) = parse_method_path(header_bytes);
-    // PHP 回调现在返回完整的 HTTP 响应文本（含 header 部分）。
-    // 直接写回给客户端。
-    let response = crate::php_api::call_on_http(*http_handler, &method, &path, &raw_headers, &body);
+/// 写一个简单的错误响应
+async fn write_simple_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    status_text: &str,
+    _body_html: &str,
+) -> std::io::Result<()> {
+    let body = format!(
+        "<html><body><h1>{} {}</h1></body></html>",
+        status_code, status_text
+    );
+    let response = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status_code,
+        status_text,
+        body.len()
+    );
     stream.write_all(response.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
 
-/// 根据 header 中的 Content-Length（如有），继续从 stream 中读取剩余
-/// body 字节。如果没有 Content-Length 则直接返回已读取的 pre_body。
+/// 根据 header 中的 Content-Length 读取 body。Content-Length 超过 body_max
+/// 直接返回错误（由上层返回 413）。
 async fn read_body(
     header_bytes: &[u8],
     stream: &mut TcpStream,
     pre_body: &[u8],
+    body_max: usize,
 ) -> std::io::Result<String> {
     let mut body_vec: Vec<u8> = pre_body.to_vec();
 
-    // 从 header 文本中解析 Content-Length
     let content_length = header_bytes
         .split(|b| *b == b'\n')
         .find_map(|line| {
@@ -204,7 +377,14 @@ async fn read_body(
         return Ok(String::from_utf8_lossy(&body_vec).to_string());
     }
 
-    // 继续从 stream 中读取，直到获得足够的 body
+    // Content-Length 超过上限直接拒绝（避免攻击者制造大内存分配）
+    if content_length > body_max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "body too large",
+        ));
+    }
+
     while body_vec.len() < content_length {
         let mut tmp = vec![0u8; 4096];
         let n = stream.read(&mut tmp).await?;
@@ -216,7 +396,6 @@ async fn read_body(
             break;
         }
     }
-    // 只取 Content-Length 指定的字节数
     if body_vec.len() > content_length {
         body_vec.truncate(content_length);
     }
