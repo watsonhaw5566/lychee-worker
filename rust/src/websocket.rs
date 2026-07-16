@@ -468,7 +468,10 @@ mod tests {
     fn heartbeat_interval_greater_than_timeout_is_capped() {
         // 异常配置：间隔 > 超时 → 自动把 interval 缩小到 timeout-1
         let (interval, timeout) = normalize_heartbeat_config(120, 60);
-        assert!(interval < timeout, "interval 必须小于 timeout，否则心跳没有意义");
+        assert!(
+            interval < timeout,
+            "interval 必须小于 timeout，否则心跳没有意义"
+        );
         assert_eq!(interval.as_secs(), 59);
         assert_eq!(timeout.as_secs(), 60);
     }

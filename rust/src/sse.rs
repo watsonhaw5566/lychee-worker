@@ -60,11 +60,15 @@ pub(crate) unsafe fn set_stream_fd(_raw_fd: i32) {
 }
 
 /// 清除并释放当前 SSE 流，由 PHP 回调返回后调用。
+/// 注意：此处不调用 shutdown(SHUT_RDWR)，因为 dup 的 fd 与 tokio 侧共享同一
+/// 同一个底层 socket；shutdown 会导致 tokio 无法写响应。直接 drop 掉流即可。
 pub(crate) fn clear_stream() {
     ACTIVE_STREAM.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        if let Some(stream) = borrow.take() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+        if let Some(mut stream) = borrow.take() {
+            // 仅 flush 未写的字节（若有）；如果是 SSE 模式已有 end() 已写
+            // 终止符，否则流在 drop 时释放 fd 自动关闭
+            let _ = stream.flush();
         }
     });
     SSE_STARTED.with(|cell| cell.set(false));
@@ -80,7 +84,9 @@ pub(crate) fn was_sse_started() -> bool {
 fn write_chunked(data: &[u8]) -> bool {
     ACTIVE_STREAM.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(stream) = borrow.as_mut() else { return false; };
+        let Some(stream) = borrow.as_mut() else {
+            return false;
+        };
         let header = format!("{:x}\r\n", data.len());
         let r1 = stream.write_all(header.as_bytes());
         let r2 = stream.write_all(data);
@@ -93,7 +99,9 @@ fn write_chunked(data: &[u8]) -> bool {
 fn write_chunked_terminator() -> bool {
     ACTIVE_STREAM.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(stream) = borrow.as_mut() else { return false; };
+        let Some(stream) = borrow.as_mut() else {
+            return false;
+        };
         let _ = stream.write_all(b"0\r\n\r\n");
         stream.flush().is_ok()
     })
@@ -103,7 +111,9 @@ fn write_chunked_terminator() -> bool {
 fn write_raw(data: &[u8]) -> bool {
     ACTIVE_STREAM.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(stream) = borrow.as_mut() else { return false; };
+        let Some(stream) = borrow.as_mut() else {
+            return false;
+        };
         stream.write_all(data).is_ok()
     })
 }
@@ -117,7 +127,10 @@ pub fn format_event(event: &str, data: &str) -> Vec<u8> {
     if !event.is_empty() {
         buf.extend_from_slice(b"event: ");
         // event 名含 \r/\n 时截断（避免注入额外字段）
-        let clean: String = event.chars().take_while(|c| *c != '\r' && *c != '\n').collect();
+        let clean: String = event
+            .chars()
+            .take_while(|c| *c != '\r' && *c != '\n')
+            .collect();
         buf.extend_from_slice(clean.as_bytes());
         buf.extend_from_slice(b"\r\n");
     }

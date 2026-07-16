@@ -49,3 +49,45 @@ Route::get('static/:path', function (string $path) {
 Route::get('/error', function () {
     throw new \RuntimeException('intentional test error');
 });
+
+// —— SSE 测试路由 ——
+// 基本流：发送 3 条事件后结束
+Route::get('/sse/basic', function () {
+    if (!function_exists('lychee_worker_sse_start')) {
+        return response('SSE extension not loaded', 500);
+    }
+
+    \lychee_worker_sse_start();
+    \lychee_worker_sse_send('update', 'hello-1');
+    \lychee_worker_sse_send('update', 'hello-2');
+    \lychee_worker_sse_send('done', 'finished');
+    \lychee_worker_sse_end();
+
+    return '';
+});
+
+// 无名事件：event 为空时，浏览器默认为 "message" 类型
+Route::get('/sse/no-event-name', function () {
+    if (!function_exists('lychee_worker_sse_start')) {
+        return response('SSE extension not loaded', 500);
+    }
+
+    \lychee_worker_sse_start();
+    \lychee_worker_sse_send('', 'plain-data');
+    \lychee_worker_sse_end();
+
+    return '';
+});
+
+// 多行 data：换行符会被拆成多个 data: 前缀
+Route::get('/sse/multiline-data', function () {
+    if (!function_exists('lychee_worker_sse_start')) {
+        return response('SSE extension not loaded', 500);
+    }
+
+    \lychee_worker_sse_start();
+    \lychee_worker_sse_send('msg', "line1\nline2\nline3");
+    \lychee_worker_sse_end();
+
+    return '';
+});
