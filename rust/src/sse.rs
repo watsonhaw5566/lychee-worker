@@ -25,8 +25,8 @@ use std::net::TcpStream;
 // 线程局部：当前 PHP 回调可写的阻塞 TCP 流（dup 自 tokio 流）。
 // 在 `http.rs::handle_connection` 调用 PHP 前设置，PHP 返回后清除。
 thread_local! {
-    static ACTIVE_STREAM: RefCell<Option<TcpStream>> = RefCell::new(None);
-    static SSE_STARTED: Cell<bool> = Cell::new(false);
+    static ACTIVE_STREAM: RefCell<Option<TcpStream>> = const { RefCell::new(None) };
+    static SSE_STARTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 通过 Unix raw fd 创建一个阻塞的 TcpStream 并存入线程局部。

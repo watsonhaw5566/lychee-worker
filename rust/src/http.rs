@@ -9,6 +9,15 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// 一次性封装 PHP 侧注册的 4 个回调（配合 leak_callable 生成 'static 引用）。
+#[derive(Copy, Clone)]
+struct HandlerBundle {
+    http: &'static Option<&'static ZendCallable<'static>>,
+    ws_open: &'static Option<&'static ZendCallable<'static>>,
+    ws_message: &'static Option<&'static ZendCallable<'static>>,
+    ws_close: &'static Option<&'static ZendCallable<'static>>,
+}
+
 /// 在主循环启动前，对端口做一次快速的占用检测。
 /// 如果被占用则打印清晰的命令提示并返回 Err，从而避免父进程进入
 /// 无限重启循环。
@@ -71,10 +80,12 @@ pub async fn serve<'a>(
     let listener = bind_with_reuse(addr)?;
 
     // 将回调引用泄露为 'static，以便在 tokio spawn_local 的任务中使用
-    let leaked_http = leak_callable(http_handler);
-    let leaked_open = leak_callable(ws_open_handler);
-    let leaked_msg = leak_callable(ws_message_handler);
-    let leaked_close = leak_callable(ws_close_handler);
+    let handlers = HandlerBundle {
+        http: leak_callable(http_handler),
+        ws_open: leak_callable(ws_open_handler),
+        ws_message: leak_callable(ws_message_handler),
+        ws_close: leak_callable(ws_close_handler),
+    };
 
     // 从配置中提取运行参数
     let request_timeout = Duration::from_secs(cfg.request_timeout_sec);
@@ -104,10 +115,7 @@ pub async fn serve<'a>(
                         tokio::task::spawn_local(async move {
                             let result = handle_connection(
                                 stream,
-                                leaked_http,
-                                leaked_open,
-                                leaked_msg,
-                                leaked_close,
+                                &handlers,
                                 request_timeout,
                                 header_max,
                                 body_max,
@@ -162,10 +170,7 @@ fn leak_callable<'a>(
 
 async fn handle_connection(
     mut stream: TcpStream,
-    http_handler: &'static Option<&'static ZendCallable<'static>>,
-    ws_open_handler: &'static Option<&'static ZendCallable<'static>>,
-    ws_message_handler: &'static Option<&'static ZendCallable<'static>>,
-    ws_close_handler: &'static Option<&'static ZendCallable<'static>>,
+    handlers: &HandlerBundle,
     request_timeout: Duration,
     header_max: usize,
     body_max: usize,
@@ -202,9 +207,9 @@ async fn handle_connection(
             return crate::websocket::handle_upgrade(
                 stream,
                 &buf_full,
-                *ws_open_handler,
-                *ws_message_handler,
-                *ws_close_handler,
+                *handlers.ws_open,
+                *handlers.ws_message,
+                *handlers.ws_close,
                 ping_interval_sec,
                 ping_timeout_sec,
             )
@@ -255,7 +260,7 @@ async fn handle_connection(
 
         // 7) 调用 PHP 回调
         let response =
-            crate::php_api::call_on_http(*http_handler, &method, &path, &raw_headers, &body);
+            crate::php_api::call_on_http(*handlers.http, &method, &path, &raw_headers, &body);
 
         // 8) 检查是否使用 SSE：使用了则跳过正常响应写入
         let sse_used = crate::sse::was_sse_started();
